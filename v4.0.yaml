@@ -33,7 +33,6 @@ jobs:
     steps:
       - name: Stream Output
         run: |
-          set -e
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
           
           # Wait for output file to exist (with timeout)
