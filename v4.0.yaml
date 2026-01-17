@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Stream Output
         run: |
-          set -x
+          set -euo pipefail
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
           
           # Wait for output file to exist (with timeout)
