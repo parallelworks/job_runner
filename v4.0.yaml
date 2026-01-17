@@ -68,10 +68,9 @@ jobs:
           
           kill ${tail_pid} 2>/dev/null || true
           
-          # If job.ended exists without CANCEL_STREAMING, it was a failure
+          # Avoid failing stream_output if cleanup hasn't marked COMPLETED yet.
           if [ -f "job.ended" ] && [ ! -f "COMPLETED" ]; then
-            echo "$(date) ERROR: Job ended unexpectedly"
-            exit 1
+            echo "$(date) job.ended detected before COMPLETED; stream output ending"
           fi
 
   # ============================================================================
