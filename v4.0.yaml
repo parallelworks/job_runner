@@ -26,12 +26,12 @@ jobs:
   # ============================================================================
   # Output Streaming - Tails job output for real-time visibility
   # ============================================================================
-  output:
+  log:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
     steps:
-      - name: JobOutput
+      - name: Job Output
         run: |
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
 
