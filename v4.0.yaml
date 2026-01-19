@@ -26,12 +26,12 @@ jobs:
   # ============================================================================
   # Output Streaming - Tails job output for real-time visibility
   # ============================================================================
-  stream_output:
+  output:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
     steps:
-      - name: Stream Output
+      - name: JobOutput
         run: |
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
 
@@ -68,7 +68,7 @@ jobs:
 
           kill ${tail_pid} 2>/dev/null || true
 
-          # Avoid failing stream_output if cleanup hasn't marked COMPLETED yet.
+          # Avoid failing output if cleanup hasn't marked COMPLETED yet.
           if [ -f "job.ended" ] && [ ! -f "COMPLETED" ]; then
             echo "$(date) job.ended detected before COMPLETED; stream output ending"
           fi
