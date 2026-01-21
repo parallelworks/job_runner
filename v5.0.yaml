@@ -1,0 +1,1876 @@
+# yaml-language-server: $schema=https://activate.parallel.works/workflow.schema.json
+---
+# ==============================================================================
+# Job Runner v5.0 - Multi-Site Load Balancer
+# ==============================================================================
+# Enables job submission across multiple compute resources (SSH, PBS, SLURM)
+# with two execution modes:
+#   - Race: First site to start wins, others cancelled
+#   - Parallel: Run on all sites simultaneously
+#
+# Usage:
+#   - Configure multiple sites with different schedulers
+#   - Select execution mode (race or parallel)
+#   - Monitor aggregated output from all sites
+#   - Automatic fault tolerance with retries and failover
+# ==============================================================================
+
+jobs:
+  # ============================================================================
+  # Initialize - Validate sites and create coordination structure
+  # ============================================================================
+  initialize:
+    steps:
+      - name: Setup Coordination Directory
+        run: |
+          set -e
+          echo "$(date) [coordinator] Initializing load balancer execution"
+
+          # Create coordination directory
+          COORD_DIR="${PWD}/lb_${PW_JOB_ID}"
+          mkdir -p "${COORD_DIR}"
+
+          # Count enabled sites
+          enabled_count=0
+
+          # Check each site's enabled status and create site directories
+          sites_json='[]'
+
+          # Site 0
+          if [[ "${{ inputs.sites_0.enabled }}" == "true" ]]; then
+            mkdir -p "${COORD_DIR}/site_0"
+            echo "PENDING" > "${COORD_DIR}/site_0/status"
+            echo "${{ inputs.sites_0.name }}" > "${COORD_DIR}/site_0/name"
+            echo "${{ inputs.sites_0.priority }}" > "${COORD_DIR}/site_0/priority"
+            ((enabled_count++)) || true
+            echo "$(date) [coordinator] Site 0 (${{ inputs.sites_0.name }}) enabled with priority ${{ inputs.sites_0.priority }}"
+          fi
+
+          # Site 1
+          if [[ "${{ inputs.sites_1.enabled }}" == "true" ]]; then
+            mkdir -p "${COORD_DIR}/site_1"
+            echo "PENDING" > "${COORD_DIR}/site_1/status"
+            echo "${{ inputs.sites_1.name }}" > "${COORD_DIR}/site_1/name"
+            echo "${{ inputs.sites_1.priority }}" > "${COORD_DIR}/site_1/priority"
+            ((enabled_count++)) || true
+            echo "$(date) [coordinator] Site 1 (${{ inputs.sites_1.name }}) enabled with priority ${{ inputs.sites_1.priority }}"
+          fi
+
+          # Site 2
+          if [[ "${{ inputs.sites_2.enabled }}" == "true" ]]; then
+            mkdir -p "${COORD_DIR}/site_2"
+            echo "PENDING" > "${COORD_DIR}/site_2/status"
+            echo "${{ inputs.sites_2.name }}" > "${COORD_DIR}/site_2/name"
+            echo "${{ inputs.sites_2.priority }}" > "${COORD_DIR}/site_2/priority"
+            ((enabled_count++)) || true
+            echo "$(date) [coordinator] Site 2 (${{ inputs.sites_2.name }}) enabled with priority ${{ inputs.sites_2.priority }}"
+          fi
+
+          # Site 3
+          if [[ "${{ inputs.sites_3.enabled }}" == "true" ]]; then
+            mkdir -p "${COORD_DIR}/site_3"
+            echo "PENDING" > "${COORD_DIR}/site_3/status"
+            echo "${{ inputs.sites_3.name }}" > "${COORD_DIR}/site_3/name"
+            echo "${{ inputs.sites_3.priority }}" > "${COORD_DIR}/site_3/priority"
+            ((enabled_count++)) || true
+            echo "$(date) [coordinator] Site 3 (${{ inputs.sites_3.name }}) enabled with priority ${{ inputs.sites_3.priority }}"
+          fi
+
+          # Site 4
+          if [[ "${{ inputs.sites_4.enabled }}" == "true" ]]; then
+            mkdir -p "${COORD_DIR}/site_4"
+            echo "PENDING" > "${COORD_DIR}/site_4/status"
+            echo "${{ inputs.sites_4.name }}" > "${COORD_DIR}/site_4/name"
+            echo "${{ inputs.sites_4.priority }}" > "${COORD_DIR}/site_4/priority"
+            ((enabled_count++)) || true
+            echo "$(date) [coordinator] Site 4 (${{ inputs.sites_4.name }}) enabled with priority ${{ inputs.sites_4.priority }}"
+          fi
+
+          # Validate at least one site enabled
+          if [[ ${enabled_count} -eq 0 ]]; then
+            echo "$(date) [coordinator] ERROR: No sites enabled"
+            exit 1
+          fi
+
+          echo "${enabled_count}" > "${COORD_DIR}/enabled_count"
+          echo "$(date) [coordinator] ${enabled_count} site(s) enabled"
+          echo "$(date) [coordinator] Execution mode: ${{ inputs.execution_mode }}"
+
+          # Initialize event log
+          echo '{"ts":"'$(date -Iseconds)'","level":"INFO","src":"coordinator","msg":"Load balancer initialized with '${enabled_count}' sites in ${{ inputs.execution_mode }} mode"}' > "${COORD_DIR}/events.jsonl"
+
+  # ============================================================================
+  # Site 0 - Job Submission
+  # ============================================================================
+  site_0:
+    needs: [initialize]
+    if: ${{ inputs.sites_0.enabled == true }}
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}/site_0
+    ssh:
+      remoteHost: ${{ inputs.sites_0.resource.ip }}
+    steps:
+      - name: Submit Job to Site 0
+        run: |
+          set -e
+          SITE_NAME="${{ inputs.sites_0.name }}"
+          SITE_ID="site_0"
+
+          echo "$(date) [${SITE_ID}] Starting job submission to ${SITE_NAME}"
+          echo "SUBMITTING" > status
+
+          # Check if we should cancel (race mode - another site won)
+          if [ -f "../WINNER" ]; then
+            echo "$(date) [${SITE_ID}] Another site already won, skipping submission"
+            echo "CANCELLED" > status
+            exit 0
+          fi
+
+          # Create script from input
+          if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
+            if [ ! -f "${{ inputs.script_path }}" ]; then
+              echo "$(date) [${SITE_ID}] ERROR: Script file not found: ${{ inputs.script_path }}"
+              echo "FAILED" > status
+              exit 1
+            fi
+            cp "${{ inputs.script_path }}" run-script.sh
+          else
+            cat > run-script.sh << 'SCRIPT_EOF'
+          ${{ inputs.script }}
+          SCRIPT_EOF
+          fi
+          chmod +x run-script.sh
+
+          # Inject job markers
+          cat > run.sh << 'MARKER_EOF'
+          #!/bin/bash
+          touch job.started
+          hostname > HOSTNAME
+          echo "$(date) Job started on $(hostname)"
+          MARKER_EOF
+          cat run-script.sh >> run.sh
+          chmod +x run.sh
+
+          # Determine execution mode (scheduler vs SSH)
+          if [[ "${{ inputs.sites_0.scheduler }}" == "true" ]]; then
+            # Check scheduler type from resource
+            SCHEDULER_TYPE="${{ inputs.sites_0.resource.schedulerType }}"
+
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via SLURM"
+
+              # Build SLURM script
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#SBATCH --job-name=lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#SBATCH --output=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --error=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --chdir=${PWD}" >> submit.sh
+
+              [[ -n "${{ inputs.sites_0.slurm.account }}" && "${{ inputs.sites_0.slurm.account }}" != "undefined" ]] && \
+                echo "#SBATCH --account=${{ inputs.sites_0.slurm.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_0.slurm.partition }}" && "${{ inputs.sites_0.slurm.partition }}" != "undefined" ]] && \
+                echo "#SBATCH --partition=${{ inputs.sites_0.slurm.partition }}" >> submit.sh
+              [[ -n "${{ inputs.sites_0.slurm.time }}" && "${{ inputs.sites_0.slurm.time }}" != "undefined" ]] && \
+                echo "#SBATCH --time=${{ inputs.sites_0.slurm.time }}" >> submit.sh
+              [[ -n "${{ inputs.sites_0.slurm.nodes }}" && "${{ inputs.sites_0.slurm.nodes }}" != "undefined" ]] && \
+                echo "#SBATCH --nodes=${{ inputs.sites_0.slurm.nodes }}" >> submit.sh
+
+              echo "" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              # Clean up undefined directives
+              sed -i '/^#SBATCH.*undefined/d' submit.sh
+              sed -i '/^#SBATCH --[^=]*=$/d' submit.sh
+
+              # Submit
+              submit_output=$(sbatch submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: sbatch failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '[0-9]+$' | tail -1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] SLURM job submitted: ${jobid}"
+
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via PBS"
+
+              # Build PBS script
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#PBS -N lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#PBS -o ${PWD}/run.out" >> submit.sh
+              echo "#PBS -j oe" >> submit.sh
+
+              [[ -n "${{ inputs.sites_0.pbs.account }}" && "${{ inputs.sites_0.pbs.account }}" != "undefined" ]] && \
+                echo "#PBS -A ${{ inputs.sites_0.pbs.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_0.pbs.queue }}" && "${{ inputs.sites_0.pbs.queue }}" != "undefined" ]] && \
+                echo "#PBS -q ${{ inputs.sites_0.pbs.queue }}" >> submit.sh
+              [[ -n "${{ inputs.sites_0.pbs.walltime }}" && "${{ inputs.sites_0.pbs.walltime }}" != "undefined" ]] && \
+                echo "#PBS -l walltime=${{ inputs.sites_0.pbs.walltime }}" >> submit.sh
+
+              echo "" >> submit.sh
+              echo "cd ${PWD}" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              # Clean up undefined directives
+              sed -i '/^#PBS.*undefined/d' submit.sh
+
+              # Submit
+              submit_output=$(qsub submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: qsub failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '^[0-9]+' | head -1)
+              [[ -z "${jobid}" ]] && jobid=$(echo "${submit_output}" | cut -d'.' -f1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] PBS job submitted: ${jobid}"
+            fi
+
+            echo "SUBMITTED" > status
+
+            # Monitor job until started or completed
+            while true; do
+              # Check for cancellation request
+              if [ -f "CANCEL_REQUESTED" ] || [ -f "../WINNER" ]; then
+                if [ -f jobid ]; then
+                  jobid=$(cat jobid)
+                  if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                    scancel "${jobid}" 2>/dev/null || true
+                  elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                    qdel "${jobid}" 2>/dev/null || true
+                  fi
+                fi
+                echo "$(date) [${SITE_ID}] Job cancelled"
+                echo "CANCELLED" > status
+                touch job.ended
+                exit 0
+              fi
+
+              # Check if job started
+              if [ -f "job.started" ]; then
+                echo "$(date) [${SITE_ID}] Job started running"
+                echo "RUNNING" > status
+
+                # In race mode, signal we're the winner
+                if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+                  if [ ! -f "../WINNER" ]; then
+                    echo "${SITE_ID}" > "../WINNER"
+                    echo "$(date) [${SITE_ID}] Won the race!"
+                  fi
+                fi
+              fi
+
+              # Check if job ended
+              if [ -f "job.ended" ]; then
+                echo "$(date) [${SITE_ID}] Job ended"
+                echo "COMPLETED" > status
+                break
+              fi
+
+              # Check scheduler status
+              if [ -f jobid ]; then
+                jobid=$(cat jobid)
+                if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                  job_in_queue=$(squeue -j "${jobid}" --noheader 2>/dev/null | wc -l)
+                  if [[ ${job_in_queue} -eq 0 ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                  job_state=$(qstat -f "${jobid}" 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
+                  if [[ "${job_state}" == "C" || "${job_state}" == "E" || -z "${job_state}" ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                fi
+              fi
+
+              sleep ${{ inputs.poll_interval }}
+            done
+
+          else
+            # Direct SSH execution
+            echo "$(date) [${SITE_ID}] Executing via SSH"
+            echo "RUNNING" > status
+
+            # Signal we've started (for race mode)
+            touch job.started
+            if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+              if [ ! -f "../WINNER" ]; then
+                echo "${SITE_ID}" > "../WINNER"
+                echo "$(date) [${SITE_ID}] Won the race!"
+              fi
+            fi
+
+            # Execute
+            ./run.sh > run.out 2>&1
+            exit_code=$?
+
+            touch job.ended
+            echo "${exit_code}" > exit_code
+
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "$(date) [${SITE_ID}] Script failed with exit code ${exit_code}"
+              echo "FAILED" > status
+            else
+              echo "$(date) [${SITE_ID}] Script completed successfully"
+              echo "COMPLETED" > status
+            fi
+          fi
+        cleanup: |
+          SITE_ID="site_0"
+          echo "$(date) [${SITE_ID}] Cleanup triggered"
+
+          # Cancel scheduler job if running
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            SCHEDULER_TYPE="${{ inputs.sites_0.resource.schedulerType }}"
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              scancel "${jobid}" 2>/dev/null || true
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              qdel "${jobid}" 2>/dev/null || true
+            fi
+          fi
+
+          touch job.ended
+          [ ! -f status ] && echo "CANCELLED" > status
+
+  # ============================================================================
+  # Site 1 - Job Submission
+  # ============================================================================
+  site_1:
+    needs: [initialize]
+    if: ${{ inputs.sites_1.enabled == true }}
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}/site_1
+    ssh:
+      remoteHost: ${{ inputs.sites_1.resource.ip }}
+    steps:
+      - name: Submit Job to Site 1
+        run: |
+          set -e
+          SITE_NAME="${{ inputs.sites_1.name }}"
+          SITE_ID="site_1"
+
+          echo "$(date) [${SITE_ID}] Starting job submission to ${SITE_NAME}"
+          echo "SUBMITTING" > status
+
+          if [ -f "../WINNER" ]; then
+            echo "$(date) [${SITE_ID}] Another site already won, skipping submission"
+            echo "CANCELLED" > status
+            exit 0
+          fi
+
+          if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
+            if [ ! -f "${{ inputs.script_path }}" ]; then
+              echo "$(date) [${SITE_ID}] ERROR: Script file not found: ${{ inputs.script_path }}"
+              echo "FAILED" > status
+              exit 1
+            fi
+            cp "${{ inputs.script_path }}" run-script.sh
+          else
+            cat > run-script.sh << 'SCRIPT_EOF'
+          ${{ inputs.script }}
+          SCRIPT_EOF
+          fi
+          chmod +x run-script.sh
+
+          cat > run.sh << 'MARKER_EOF'
+          #!/bin/bash
+          touch job.started
+          hostname > HOSTNAME
+          echo "$(date) Job started on $(hostname)"
+          MARKER_EOF
+          cat run-script.sh >> run.sh
+          chmod +x run.sh
+
+          if [[ "${{ inputs.sites_1.scheduler }}" == "true" ]]; then
+            SCHEDULER_TYPE="${{ inputs.sites_1.resource.schedulerType }}"
+
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via SLURM"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#SBATCH --job-name=lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#SBATCH --output=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --error=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --chdir=${PWD}" >> submit.sh
+
+              [[ -n "${{ inputs.sites_1.slurm.account }}" && "${{ inputs.sites_1.slurm.account }}" != "undefined" ]] && \
+                echo "#SBATCH --account=${{ inputs.sites_1.slurm.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_1.slurm.partition }}" && "${{ inputs.sites_1.slurm.partition }}" != "undefined" ]] && \
+                echo "#SBATCH --partition=${{ inputs.sites_1.slurm.partition }}" >> submit.sh
+              [[ -n "${{ inputs.sites_1.slurm.time }}" && "${{ inputs.sites_1.slurm.time }}" != "undefined" ]] && \
+                echo "#SBATCH --time=${{ inputs.sites_1.slurm.time }}" >> submit.sh
+              [[ -n "${{ inputs.sites_1.slurm.nodes }}" && "${{ inputs.sites_1.slurm.nodes }}" != "undefined" ]] && \
+                echo "#SBATCH --nodes=${{ inputs.sites_1.slurm.nodes }}" >> submit.sh
+
+              echo "" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#SBATCH.*undefined/d' submit.sh
+              sed -i '/^#SBATCH --[^=]*=$/d' submit.sh
+
+              submit_output=$(sbatch submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: sbatch failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '[0-9]+$' | tail -1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] SLURM job submitted: ${jobid}"
+
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via PBS"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#PBS -N lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#PBS -o ${PWD}/run.out" >> submit.sh
+              echo "#PBS -j oe" >> submit.sh
+
+              [[ -n "${{ inputs.sites_1.pbs.account }}" && "${{ inputs.sites_1.pbs.account }}" != "undefined" ]] && \
+                echo "#PBS -A ${{ inputs.sites_1.pbs.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_1.pbs.queue }}" && "${{ inputs.sites_1.pbs.queue }}" != "undefined" ]] && \
+                echo "#PBS -q ${{ inputs.sites_1.pbs.queue }}" >> submit.sh
+              [[ -n "${{ inputs.sites_1.pbs.walltime }}" && "${{ inputs.sites_1.pbs.walltime }}" != "undefined" ]] && \
+                echo "#PBS -l walltime=${{ inputs.sites_1.pbs.walltime }}" >> submit.sh
+
+              echo "" >> submit.sh
+              echo "cd ${PWD}" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#PBS.*undefined/d' submit.sh
+
+              submit_output=$(qsub submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: qsub failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '^[0-9]+' | head -1)
+              [[ -z "${jobid}" ]] && jobid=$(echo "${submit_output}" | cut -d'.' -f1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] PBS job submitted: ${jobid}"
+            fi
+
+            echo "SUBMITTED" > status
+
+            while true; do
+              if [ -f "CANCEL_REQUESTED" ] || [ -f "../WINNER" ]; then
+                if [ -f jobid ]; then
+                  jobid=$(cat jobid)
+                  if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                    scancel "${jobid}" 2>/dev/null || true
+                  elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                    qdel "${jobid}" 2>/dev/null || true
+                  fi
+                fi
+                echo "$(date) [${SITE_ID}] Job cancelled"
+                echo "CANCELLED" > status
+                touch job.ended
+                exit 0
+              fi
+
+              if [ -f "job.started" ]; then
+                echo "$(date) [${SITE_ID}] Job started running"
+                echo "RUNNING" > status
+
+                if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+                  if [ ! -f "../WINNER" ]; then
+                    echo "${SITE_ID}" > "../WINNER"
+                    echo "$(date) [${SITE_ID}] Won the race!"
+                  fi
+                fi
+              fi
+
+              if [ -f "job.ended" ]; then
+                echo "$(date) [${SITE_ID}] Job ended"
+                echo "COMPLETED" > status
+                break
+              fi
+
+              if [ -f jobid ]; then
+                jobid=$(cat jobid)
+                if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                  job_in_queue=$(squeue -j "${jobid}" --noheader 2>/dev/null | wc -l)
+                  if [[ ${job_in_queue} -eq 0 ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                  job_state=$(qstat -f "${jobid}" 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
+                  if [[ "${job_state}" == "C" || "${job_state}" == "E" || -z "${job_state}" ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                fi
+              fi
+
+              sleep ${{ inputs.poll_interval }}
+            done
+
+          else
+            echo "$(date) [${SITE_ID}] Executing via SSH"
+            echo "RUNNING" > status
+
+            touch job.started
+            if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+              if [ ! -f "../WINNER" ]; then
+                echo "${SITE_ID}" > "../WINNER"
+                echo "$(date) [${SITE_ID}] Won the race!"
+              fi
+            fi
+
+            ./run.sh > run.out 2>&1
+            exit_code=$?
+
+            touch job.ended
+            echo "${exit_code}" > exit_code
+
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "$(date) [${SITE_ID}] Script failed with exit code ${exit_code}"
+              echo "FAILED" > status
+            else
+              echo "$(date) [${SITE_ID}] Script completed successfully"
+              echo "COMPLETED" > status
+            fi
+          fi
+        cleanup: |
+          SITE_ID="site_1"
+          echo "$(date) [${SITE_ID}] Cleanup triggered"
+
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            SCHEDULER_TYPE="${{ inputs.sites_1.resource.schedulerType }}"
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              scancel "${jobid}" 2>/dev/null || true
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              qdel "${jobid}" 2>/dev/null || true
+            fi
+          fi
+
+          touch job.ended
+          [ ! -f status ] && echo "CANCELLED" > status
+
+  # ============================================================================
+  # Site 2 - Job Submission
+  # ============================================================================
+  site_2:
+    needs: [initialize]
+    if: ${{ inputs.sites_2.enabled == true }}
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}/site_2
+    ssh:
+      remoteHost: ${{ inputs.sites_2.resource.ip }}
+    steps:
+      - name: Submit Job to Site 2
+        run: |
+          set -e
+          SITE_NAME="${{ inputs.sites_2.name }}"
+          SITE_ID="site_2"
+
+          echo "$(date) [${SITE_ID}] Starting job submission to ${SITE_NAME}"
+          echo "SUBMITTING" > status
+
+          if [ -f "../WINNER" ]; then
+            echo "$(date) [${SITE_ID}] Another site already won, skipping submission"
+            echo "CANCELLED" > status
+            exit 0
+          fi
+
+          if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
+            if [ ! -f "${{ inputs.script_path }}" ]; then
+              echo "$(date) [${SITE_ID}] ERROR: Script file not found: ${{ inputs.script_path }}"
+              echo "FAILED" > status
+              exit 1
+            fi
+            cp "${{ inputs.script_path }}" run-script.sh
+          else
+            cat > run-script.sh << 'SCRIPT_EOF'
+          ${{ inputs.script }}
+          SCRIPT_EOF
+          fi
+          chmod +x run-script.sh
+
+          cat > run.sh << 'MARKER_EOF'
+          #!/bin/bash
+          touch job.started
+          hostname > HOSTNAME
+          echo "$(date) Job started on $(hostname)"
+          MARKER_EOF
+          cat run-script.sh >> run.sh
+          chmod +x run.sh
+
+          if [[ "${{ inputs.sites_2.scheduler }}" == "true" ]]; then
+            SCHEDULER_TYPE="${{ inputs.sites_2.resource.schedulerType }}"
+
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via SLURM"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#SBATCH --job-name=lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#SBATCH --output=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --error=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --chdir=${PWD}" >> submit.sh
+
+              [[ -n "${{ inputs.sites_2.slurm.account }}" && "${{ inputs.sites_2.slurm.account }}" != "undefined" ]] && \
+                echo "#SBATCH --account=${{ inputs.sites_2.slurm.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_2.slurm.partition }}" && "${{ inputs.sites_2.slurm.partition }}" != "undefined" ]] && \
+                echo "#SBATCH --partition=${{ inputs.sites_2.slurm.partition }}" >> submit.sh
+              [[ -n "${{ inputs.sites_2.slurm.time }}" && "${{ inputs.sites_2.slurm.time }}" != "undefined" ]] && \
+                echo "#SBATCH --time=${{ inputs.sites_2.slurm.time }}" >> submit.sh
+              [[ -n "${{ inputs.sites_2.slurm.nodes }}" && "${{ inputs.sites_2.slurm.nodes }}" != "undefined" ]] && \
+                echo "#SBATCH --nodes=${{ inputs.sites_2.slurm.nodes }}" >> submit.sh
+
+              echo "" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#SBATCH.*undefined/d' submit.sh
+              sed -i '/^#SBATCH --[^=]*=$/d' submit.sh
+
+              submit_output=$(sbatch submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: sbatch failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '[0-9]+$' | tail -1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] SLURM job submitted: ${jobid}"
+
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via PBS"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#PBS -N lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#PBS -o ${PWD}/run.out" >> submit.sh
+              echo "#PBS -j oe" >> submit.sh
+
+              [[ -n "${{ inputs.sites_2.pbs.account }}" && "${{ inputs.sites_2.pbs.account }}" != "undefined" ]] && \
+                echo "#PBS -A ${{ inputs.sites_2.pbs.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_2.pbs.queue }}" && "${{ inputs.sites_2.pbs.queue }}" != "undefined" ]] && \
+                echo "#PBS -q ${{ inputs.sites_2.pbs.queue }}" >> submit.sh
+              [[ -n "${{ inputs.sites_2.pbs.walltime }}" && "${{ inputs.sites_2.pbs.walltime }}" != "undefined" ]] && \
+                echo "#PBS -l walltime=${{ inputs.sites_2.pbs.walltime }}" >> submit.sh
+
+              echo "" >> submit.sh
+              echo "cd ${PWD}" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#PBS.*undefined/d' submit.sh
+
+              submit_output=$(qsub submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: qsub failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '^[0-9]+' | head -1)
+              [[ -z "${jobid}" ]] && jobid=$(echo "${submit_output}" | cut -d'.' -f1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] PBS job submitted: ${jobid}"
+            fi
+
+            echo "SUBMITTED" > status
+
+            while true; do
+              if [ -f "CANCEL_REQUESTED" ] || [ -f "../WINNER" ]; then
+                if [ -f jobid ]; then
+                  jobid=$(cat jobid)
+                  if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                    scancel "${jobid}" 2>/dev/null || true
+                  elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                    qdel "${jobid}" 2>/dev/null || true
+                  fi
+                fi
+                echo "$(date) [${SITE_ID}] Job cancelled"
+                echo "CANCELLED" > status
+                touch job.ended
+                exit 0
+              fi
+
+              if [ -f "job.started" ]; then
+                echo "$(date) [${SITE_ID}] Job started running"
+                echo "RUNNING" > status
+
+                if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+                  if [ ! -f "../WINNER" ]; then
+                    echo "${SITE_ID}" > "../WINNER"
+                    echo "$(date) [${SITE_ID}] Won the race!"
+                  fi
+                fi
+              fi
+
+              if [ -f "job.ended" ]; then
+                echo "$(date) [${SITE_ID}] Job ended"
+                echo "COMPLETED" > status
+                break
+              fi
+
+              if [ -f jobid ]; then
+                jobid=$(cat jobid)
+                if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                  job_in_queue=$(squeue -j "${jobid}" --noheader 2>/dev/null | wc -l)
+                  if [[ ${job_in_queue} -eq 0 ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                  job_state=$(qstat -f "${jobid}" 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
+                  if [[ "${job_state}" == "C" || "${job_state}" == "E" || -z "${job_state}" ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                fi
+              fi
+
+              sleep ${{ inputs.poll_interval }}
+            done
+
+          else
+            echo "$(date) [${SITE_ID}] Executing via SSH"
+            echo "RUNNING" > status
+
+            touch job.started
+            if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+              if [ ! -f "../WINNER" ]; then
+                echo "${SITE_ID}" > "../WINNER"
+                echo "$(date) [${SITE_ID}] Won the race!"
+              fi
+            fi
+
+            ./run.sh > run.out 2>&1
+            exit_code=$?
+
+            touch job.ended
+            echo "${exit_code}" > exit_code
+
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "$(date) [${SITE_ID}] Script failed with exit code ${exit_code}"
+              echo "FAILED" > status
+            else
+              echo "$(date) [${SITE_ID}] Script completed successfully"
+              echo "COMPLETED" > status
+            fi
+          fi
+        cleanup: |
+          SITE_ID="site_2"
+          echo "$(date) [${SITE_ID}] Cleanup triggered"
+
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            SCHEDULER_TYPE="${{ inputs.sites_2.resource.schedulerType }}"
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              scancel "${jobid}" 2>/dev/null || true
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              qdel "${jobid}" 2>/dev/null || true
+            fi
+          fi
+
+          touch job.ended
+          [ ! -f status ] && echo "CANCELLED" > status
+
+  # ============================================================================
+  # Site 3 - Job Submission
+  # ============================================================================
+  site_3:
+    needs: [initialize]
+    if: ${{ inputs.sites_3.enabled == true }}
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}/site_3
+    ssh:
+      remoteHost: ${{ inputs.sites_3.resource.ip }}
+    steps:
+      - name: Submit Job to Site 3
+        run: |
+          set -e
+          SITE_NAME="${{ inputs.sites_3.name }}"
+          SITE_ID="site_3"
+
+          echo "$(date) [${SITE_ID}] Starting job submission to ${SITE_NAME}"
+          echo "SUBMITTING" > status
+
+          if [ -f "../WINNER" ]; then
+            echo "$(date) [${SITE_ID}] Another site already won, skipping submission"
+            echo "CANCELLED" > status
+            exit 0
+          fi
+
+          if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
+            if [ ! -f "${{ inputs.script_path }}" ]; then
+              echo "$(date) [${SITE_ID}] ERROR: Script file not found: ${{ inputs.script_path }}"
+              echo "FAILED" > status
+              exit 1
+            fi
+            cp "${{ inputs.script_path }}" run-script.sh
+          else
+            cat > run-script.sh << 'SCRIPT_EOF'
+          ${{ inputs.script }}
+          SCRIPT_EOF
+          fi
+          chmod +x run-script.sh
+
+          cat > run.sh << 'MARKER_EOF'
+          #!/bin/bash
+          touch job.started
+          hostname > HOSTNAME
+          echo "$(date) Job started on $(hostname)"
+          MARKER_EOF
+          cat run-script.sh >> run.sh
+          chmod +x run.sh
+
+          if [[ "${{ inputs.sites_3.scheduler }}" == "true" ]]; then
+            SCHEDULER_TYPE="${{ inputs.sites_3.resource.schedulerType }}"
+
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via SLURM"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#SBATCH --job-name=lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#SBATCH --output=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --error=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --chdir=${PWD}" >> submit.sh
+
+              [[ -n "${{ inputs.sites_3.slurm.account }}" && "${{ inputs.sites_3.slurm.account }}" != "undefined" ]] && \
+                echo "#SBATCH --account=${{ inputs.sites_3.slurm.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_3.slurm.partition }}" && "${{ inputs.sites_3.slurm.partition }}" != "undefined" ]] && \
+                echo "#SBATCH --partition=${{ inputs.sites_3.slurm.partition }}" >> submit.sh
+              [[ -n "${{ inputs.sites_3.slurm.time }}" && "${{ inputs.sites_3.slurm.time }}" != "undefined" ]] && \
+                echo "#SBATCH --time=${{ inputs.sites_3.slurm.time }}" >> submit.sh
+              [[ -n "${{ inputs.sites_3.slurm.nodes }}" && "${{ inputs.sites_3.slurm.nodes }}" != "undefined" ]] && \
+                echo "#SBATCH --nodes=${{ inputs.sites_3.slurm.nodes }}" >> submit.sh
+
+              echo "" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#SBATCH.*undefined/d' submit.sh
+              sed -i '/^#SBATCH --[^=]*=$/d' submit.sh
+
+              submit_output=$(sbatch submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: sbatch failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '[0-9]+$' | tail -1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] SLURM job submitted: ${jobid}"
+
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via PBS"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#PBS -N lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#PBS -o ${PWD}/run.out" >> submit.sh
+              echo "#PBS -j oe" >> submit.sh
+
+              [[ -n "${{ inputs.sites_3.pbs.account }}" && "${{ inputs.sites_3.pbs.account }}" != "undefined" ]] && \
+                echo "#PBS -A ${{ inputs.sites_3.pbs.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_3.pbs.queue }}" && "${{ inputs.sites_3.pbs.queue }}" != "undefined" ]] && \
+                echo "#PBS -q ${{ inputs.sites_3.pbs.queue }}" >> submit.sh
+              [[ -n "${{ inputs.sites_3.pbs.walltime }}" && "${{ inputs.sites_3.pbs.walltime }}" != "undefined" ]] && \
+                echo "#PBS -l walltime=${{ inputs.sites_3.pbs.walltime }}" >> submit.sh
+
+              echo "" >> submit.sh
+              echo "cd ${PWD}" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#PBS.*undefined/d' submit.sh
+
+              submit_output=$(qsub submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: qsub failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '^[0-9]+' | head -1)
+              [[ -z "${jobid}" ]] && jobid=$(echo "${submit_output}" | cut -d'.' -f1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] PBS job submitted: ${jobid}"
+            fi
+
+            echo "SUBMITTED" > status
+
+            while true; do
+              if [ -f "CANCEL_REQUESTED" ] || [ -f "../WINNER" ]; then
+                if [ -f jobid ]; then
+                  jobid=$(cat jobid)
+                  if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                    scancel "${jobid}" 2>/dev/null || true
+                  elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                    qdel "${jobid}" 2>/dev/null || true
+                  fi
+                fi
+                echo "$(date) [${SITE_ID}] Job cancelled"
+                echo "CANCELLED" > status
+                touch job.ended
+                exit 0
+              fi
+
+              if [ -f "job.started" ]; then
+                echo "$(date) [${SITE_ID}] Job started running"
+                echo "RUNNING" > status
+
+                if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+                  if [ ! -f "../WINNER" ]; then
+                    echo "${SITE_ID}" > "../WINNER"
+                    echo "$(date) [${SITE_ID}] Won the race!"
+                  fi
+                fi
+              fi
+
+              if [ -f "job.ended" ]; then
+                echo "$(date) [${SITE_ID}] Job ended"
+                echo "COMPLETED" > status
+                break
+              fi
+
+              if [ -f jobid ]; then
+                jobid=$(cat jobid)
+                if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                  job_in_queue=$(squeue -j "${jobid}" --noheader 2>/dev/null | wc -l)
+                  if [[ ${job_in_queue} -eq 0 ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                  job_state=$(qstat -f "${jobid}" 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
+                  if [[ "${job_state}" == "C" || "${job_state}" == "E" || -z "${job_state}" ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                fi
+              fi
+
+              sleep ${{ inputs.poll_interval }}
+            done
+
+          else
+            echo "$(date) [${SITE_ID}] Executing via SSH"
+            echo "RUNNING" > status
+
+            touch job.started
+            if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+              if [ ! -f "../WINNER" ]; then
+                echo "${SITE_ID}" > "../WINNER"
+                echo "$(date) [${SITE_ID}] Won the race!"
+              fi
+            fi
+
+            ./run.sh > run.out 2>&1
+            exit_code=$?
+
+            touch job.ended
+            echo "${exit_code}" > exit_code
+
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "$(date) [${SITE_ID}] Script failed with exit code ${exit_code}"
+              echo "FAILED" > status
+            else
+              echo "$(date) [${SITE_ID}] Script completed successfully"
+              echo "COMPLETED" > status
+            fi
+          fi
+        cleanup: |
+          SITE_ID="site_3"
+          echo "$(date) [${SITE_ID}] Cleanup triggered"
+
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            SCHEDULER_TYPE="${{ inputs.sites_3.resource.schedulerType }}"
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              scancel "${jobid}" 2>/dev/null || true
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              qdel "${jobid}" 2>/dev/null || true
+            fi
+          fi
+
+          touch job.ended
+          [ ! -f status ] && echo "CANCELLED" > status
+
+  # ============================================================================
+  # Site 4 - Job Submission
+  # ============================================================================
+  site_4:
+    needs: [initialize]
+    if: ${{ inputs.sites_4.enabled == true }}
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}/site_4
+    ssh:
+      remoteHost: ${{ inputs.sites_4.resource.ip }}
+    steps:
+      - name: Submit Job to Site 4
+        run: |
+          set -e
+          SITE_NAME="${{ inputs.sites_4.name }}"
+          SITE_ID="site_4"
+
+          echo "$(date) [${SITE_ID}] Starting job submission to ${SITE_NAME}"
+          echo "SUBMITTING" > status
+
+          if [ -f "../WINNER" ]; then
+            echo "$(date) [${SITE_ID}] Another site already won, skipping submission"
+            echo "CANCELLED" > status
+            exit 0
+          fi
+
+          if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
+            if [ ! -f "${{ inputs.script_path }}" ]; then
+              echo "$(date) [${SITE_ID}] ERROR: Script file not found: ${{ inputs.script_path }}"
+              echo "FAILED" > status
+              exit 1
+            fi
+            cp "${{ inputs.script_path }}" run-script.sh
+          else
+            cat > run-script.sh << 'SCRIPT_EOF'
+          ${{ inputs.script }}
+          SCRIPT_EOF
+          fi
+          chmod +x run-script.sh
+
+          cat > run.sh << 'MARKER_EOF'
+          #!/bin/bash
+          touch job.started
+          hostname > HOSTNAME
+          echo "$(date) Job started on $(hostname)"
+          MARKER_EOF
+          cat run-script.sh >> run.sh
+          chmod +x run.sh
+
+          if [[ "${{ inputs.sites_4.scheduler }}" == "true" ]]; then
+            SCHEDULER_TYPE="${{ inputs.sites_4.resource.schedulerType }}"
+
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via SLURM"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#SBATCH --job-name=lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#SBATCH --output=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --error=${PWD}/run.out" >> submit.sh
+              echo "#SBATCH --chdir=${PWD}" >> submit.sh
+
+              [[ -n "${{ inputs.sites_4.slurm.account }}" && "${{ inputs.sites_4.slurm.account }}" != "undefined" ]] && \
+                echo "#SBATCH --account=${{ inputs.sites_4.slurm.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_4.slurm.partition }}" && "${{ inputs.sites_4.slurm.partition }}" != "undefined" ]] && \
+                echo "#SBATCH --partition=${{ inputs.sites_4.slurm.partition }}" >> submit.sh
+              [[ -n "${{ inputs.sites_4.slurm.time }}" && "${{ inputs.sites_4.slurm.time }}" != "undefined" ]] && \
+                echo "#SBATCH --time=${{ inputs.sites_4.slurm.time }}" >> submit.sh
+              [[ -n "${{ inputs.sites_4.slurm.nodes }}" && "${{ inputs.sites_4.slurm.nodes }}" != "undefined" ]] && \
+                echo "#SBATCH --nodes=${{ inputs.sites_4.slurm.nodes }}" >> submit.sh
+
+              echo "" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#SBATCH.*undefined/d' submit.sh
+              sed -i '/^#SBATCH --[^=]*=$/d' submit.sh
+
+              submit_output=$(sbatch submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: sbatch failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '[0-9]+$' | tail -1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] SLURM job submitted: ${jobid}"
+
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              echo "$(date) [${SITE_ID}] Submitting via PBS"
+
+              cat > submit.sh << 'SHEBANG_EOF'
+          #!/bin/bash
+          SHEBANG_EOF
+              echo "#PBS -N lb_${PW_JOB_ID}_${SITE_ID}" >> submit.sh
+              echo "#PBS -o ${PWD}/run.out" >> submit.sh
+              echo "#PBS -j oe" >> submit.sh
+
+              [[ -n "${{ inputs.sites_4.pbs.account }}" && "${{ inputs.sites_4.pbs.account }}" != "undefined" ]] && \
+                echo "#PBS -A ${{ inputs.sites_4.pbs.account }}" >> submit.sh
+              [[ -n "${{ inputs.sites_4.pbs.queue }}" && "${{ inputs.sites_4.pbs.queue }}" != "undefined" ]] && \
+                echo "#PBS -q ${{ inputs.sites_4.pbs.queue }}" >> submit.sh
+              [[ -n "${{ inputs.sites_4.pbs.walltime }}" && "${{ inputs.sites_4.pbs.walltime }}" != "undefined" ]] && \
+                echo "#PBS -l walltime=${{ inputs.sites_4.pbs.walltime }}" >> submit.sh
+
+              echo "" >> submit.sh
+              echo "cd ${PWD}" >> submit.sh
+              cat run.sh >> submit.sh
+              chmod +x submit.sh
+
+              sed -i '/^#PBS.*undefined/d' submit.sh
+
+              submit_output=$(qsub submit.sh 2>&1)
+              submit_exit=$?
+
+              if [[ $submit_exit -ne 0 ]]; then
+                echo "$(date) [${SITE_ID}] ERROR: qsub failed: ${submit_output}"
+                echo "FAILED" > status
+                exit 1
+              fi
+
+              jobid=$(echo "${submit_output}" | grep -oE '^[0-9]+' | head -1)
+              [[ -z "${jobid}" ]] && jobid=$(echo "${submit_output}" | cut -d'.' -f1)
+              echo "${jobid}" > jobid
+              echo "$(date) [${SITE_ID}] PBS job submitted: ${jobid}"
+            fi
+
+            echo "SUBMITTED" > status
+
+            while true; do
+              if [ -f "CANCEL_REQUESTED" ] || [ -f "../WINNER" ]; then
+                if [ -f jobid ]; then
+                  jobid=$(cat jobid)
+                  if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                    scancel "${jobid}" 2>/dev/null || true
+                  elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                    qdel "${jobid}" 2>/dev/null || true
+                  fi
+                fi
+                echo "$(date) [${SITE_ID}] Job cancelled"
+                echo "CANCELLED" > status
+                touch job.ended
+                exit 0
+              fi
+
+              if [ -f "job.started" ]; then
+                echo "$(date) [${SITE_ID}] Job started running"
+                echo "RUNNING" > status
+
+                if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+                  if [ ! -f "../WINNER" ]; then
+                    echo "${SITE_ID}" > "../WINNER"
+                    echo "$(date) [${SITE_ID}] Won the race!"
+                  fi
+                fi
+              fi
+
+              if [ -f "job.ended" ]; then
+                echo "$(date) [${SITE_ID}] Job ended"
+                echo "COMPLETED" > status
+                break
+              fi
+
+              if [ -f jobid ]; then
+                jobid=$(cat jobid)
+                if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+                  job_in_queue=$(squeue -j "${jobid}" --noheader 2>/dev/null | wc -l)
+                  if [[ ${job_in_queue} -eq 0 ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+                  job_state=$(qstat -f "${jobid}" 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
+                  if [[ "${job_state}" == "C" || "${job_state}" == "E" || -z "${job_state}" ]] && [ -f "job.started" ]; then
+                    touch job.ended
+                  fi
+                fi
+              fi
+
+              sleep ${{ inputs.poll_interval }}
+            done
+
+          else
+            echo "$(date) [${SITE_ID}] Executing via SSH"
+            echo "RUNNING" > status
+
+            touch job.started
+            if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+              if [ ! -f "../WINNER" ]; then
+                echo "${SITE_ID}" > "../WINNER"
+                echo "$(date) [${SITE_ID}] Won the race!"
+              fi
+            fi
+
+            ./run.sh > run.out 2>&1
+            exit_code=$?
+
+            touch job.ended
+            echo "${exit_code}" > exit_code
+
+            if [[ ${exit_code} -ne 0 ]]; then
+              echo "$(date) [${SITE_ID}] Script failed with exit code ${exit_code}"
+              echo "FAILED" > status
+            else
+              echo "$(date) [${SITE_ID}] Script completed successfully"
+              echo "COMPLETED" > status
+            fi
+          fi
+        cleanup: |
+          SITE_ID="site_4"
+          echo "$(date) [${SITE_ID}] Cleanup triggered"
+
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            SCHEDULER_TYPE="${{ inputs.sites_4.resource.schedulerType }}"
+            if [[ "${SCHEDULER_TYPE}" == "slurm" ]]; then
+              scancel "${jobid}" 2>/dev/null || true
+            elif [[ "${SCHEDULER_TYPE}" == "pbs" ]]; then
+              qdel "${jobid}" 2>/dev/null || true
+            fi
+          fi
+
+          touch job.ended
+          [ ! -f status ] && echo "CANCELLED" > status
+
+  # ============================================================================
+  # Aggregated Log Streaming
+  # ============================================================================
+  log:
+    needs: [initialize]
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}
+    steps:
+      - name: Stream Aggregated Output
+        run: |
+          echo "$(date) [log] Starting aggregated output streaming"
+
+          # Wait for at least one output file
+          timeout=120
+          elapsed=0
+          while true; do
+            output_count=$(ls site_*/run.out 2>/dev/null | wc -l || echo 0)
+            if [[ ${output_count} -gt 0 ]]; then
+              break
+            fi
+            sleep 2
+            ((elapsed+=2))
+            if [[ ${elapsed} -ge ${timeout} ]]; then
+              echo "$(date) [log] Timeout waiting for output files"
+              break
+            fi
+          done
+
+          # Tail all output files
+          if ls site_*/run.out 1>/dev/null 2>&1; then
+            # Use a simple approach: poll and cat new content
+            declare -A last_sizes
+
+            while [ ! -f "STOP_STREAMING" ]; do
+              for outfile in site_*/run.out; do
+                if [ -f "${outfile}" ]; then
+                  site_id=$(dirname "${outfile}")
+                  current_size=$(stat -c%s "${outfile}" 2>/dev/null || echo 0)
+                  last_size=${last_sizes[${outfile}]:-0}
+
+                  if [[ ${current_size} -gt ${last_size} ]]; then
+                    # Read and output new content with site prefix
+                    tail -c +$((last_size + 1)) "${outfile}" 2>/dev/null | while IFS= read -r line; do
+                      echo "[${site_id}] ${line}"
+                    done
+                    last_sizes[${outfile}]=${current_size}
+                  fi
+                fi
+              done
+              sleep 2
+            done
+          fi
+
+          echo "$(date) [log] Streaming stopped"
+        cleanup: |
+          touch STOP_STREAMING
+
+  # ============================================================================
+  # Cleanup (Always runs)
+  # ============================================================================
+  cleanup:
+    if: ${{ always }}
+    needs: [site_0, site_1, site_2, site_3, site_4, log]
+    working-directory: ${{ inputs.rundir }}/lb_${PW_JOB_ID}
+    steps:
+      - name: Generate Summary Report
+        run: |
+          echo "$(date) [coordinator] Generating execution summary"
+
+          # Count results
+          completed=0
+          failed=0
+          cancelled=0
+          total=0
+          winner=""
+
+          if [ -f WINNER ]; then
+            winner=$(cat WINNER)
+          fi
+
+          for site_dir in site_*; do
+            if [ -d "${site_dir}" ]; then
+              ((total++)) || true
+              status=$(cat "${site_dir}/status" 2>/dev/null || echo "UNKNOWN")
+
+              case "${status}" in
+                COMPLETED) ((completed++)) || true ;;
+                FAILED) ((failed++)) || true ;;
+                CANCELLED) ((cancelled++)) || true ;;
+              esac
+
+              site_name=$(cat "${site_dir}/name" 2>/dev/null || echo "${site_dir}")
+              echo "$(date) [coordinator] ${site_name}: ${status}"
+            fi
+          done
+
+          # Generate JSON summary
+          cat > summary.json << EOF
+          {
+            "execution_id": "${PW_JOB_ID}",
+            "mode": "${{ inputs.execution_mode }}",
+            "timestamp": "$(date -Iseconds)",
+            "winner": "${winner}",
+            "total_sites": ${total},
+            "completed": ${completed},
+            "failed": ${failed},
+            "cancelled": ${cancelled}
+          }
+          EOF
+
+          echo "$(date) [coordinator] Summary:"
+          cat summary.json
+
+          # Log final event
+          echo '{"ts":"'$(date -Iseconds)'","level":"INFO","src":"coordinator","msg":"Execution complete: '${completed}'/'${total}' succeeded"}' >> events.jsonl
+
+          touch STOP_STREAMING
+
+          # Determine exit code
+          if [[ "${{ inputs.execution_mode }}" == "race" ]]; then
+            # Race mode: success if winner completed
+            if [[ -n "${winner}" && -f "${winner}/status" ]]; then
+              winner_status=$(cat "${winner}/status")
+              if [[ "${winner_status}" == "COMPLETED" ]]; then
+                echo "$(date) [coordinator] Race completed successfully (winner: ${winner})"
+                exit 0
+              fi
+            fi
+            echo "$(date) [coordinator] Race failed - no successful winner"
+            exit 1
+          else
+            # Parallel mode: warn if any failed, but don't fail overall
+            if [[ ${failed} -gt 0 ]]; then
+              echo "$(date) [coordinator] WARNING: ${failed} site(s) failed"
+            fi
+            if [[ ${completed} -eq 0 ]]; then
+              echo "$(date) [coordinator] ERROR: No sites completed successfully"
+              exit 1
+            fi
+            exit 0
+          fi
+        cleanup: |
+          echo "$(date) [coordinator] Cleanup triggered - signaling all sites to stop"
+          touch STOP_STREAMING
+
+# ==============================================================================
+# INPUT DEFINITIONS
+# ==============================================================================
+"on":
+  execute:
+    inputs:
+      # ========================================================================
+      # Execution Mode
+      # ========================================================================
+      execution_mode:
+        label: Execution Mode
+        type: dropdown
+        default: "race"
+        options:
+          - value: "race"
+            label: "Race - First site to start wins"
+          - value: "parallel"
+            label: "Parallel - Run on all sites"
+        tooltip: |
+          Race: Submit to all sites, cancel others when first job starts running
+          Parallel: Run jobs on all sites simultaneously
+
+      # ========================================================================
+      # Common Settings
+      # ========================================================================
+      rundir:
+        label: Run Directory
+        type: string
+        default: ${PWD}
+        tooltip: Base directory for execution (site-specific subdirs created automatically)
+
+      poll_interval:
+        type: number
+        default: 10
+        label: Poll Interval (seconds)
+        tooltip: How often to check job status across all sites
+
+      # ========================================================================
+      # Script Configuration
+      # ========================================================================
+      use_existing_script:
+        type: boolean
+        default: false
+        label: Use Existing Script?
+        tooltip: |
+          true - Use script at script_path on each target resource
+          false - Create script from the 'script' input
+
+      script:
+        label: Script Content
+        type: editor
+        hidden: ${{ inputs.use_existing_script == true }}
+        ignore: ${{ .hidden }}
+        tooltip: The script content to execute (same script runs on all sites)
+        default: |
+          echo "Running load-balanced job on $(hostname)"
+          echo "Site directory: ${PWD}"
+          sleep 10
+          echo "Job complete"
+
+      script_path:
+        label: Script Path
+        type: string
+        optional: true
+        hidden: ${{ inputs.use_existing_script == false }}
+        ignore: ${{ .hidden }}
+        tooltip: Path to an existing script on the target resources
+
+      # ========================================================================
+      # Site 0 Configuration
+      # ========================================================================
+      sites_0:
+        type: group
+        label: "Site 0"
+        items:
+          enabled:
+            type: boolean
+            default: true
+            label: Enabled
+
+          name:
+            label: Site Name
+            type: string
+            default: "Site-0"
+            tooltip: Human-readable identifier for this site
+
+          resource:
+            label: Resource
+            type: compute-clusters
+            autoselect: false
+            optional: true
+            tooltip: The compute resource for this site
+
+          priority:
+            label: Priority
+            type: number
+            default: 1
+            min: 1
+            max: 100
+            tooltip: Lower number = higher priority (for race mode)
+
+          scheduler:
+            type: boolean
+            default: false
+            label: Submit to Scheduler?
+            tooltip: Submit via scheduler (SLURM/PBS) or direct SSH
+
+          slurm:
+            type: group
+            label: SLURM Configuration
+            hidden: ${{ inputs.sites_0.resource.schedulerType != 'slurm' || inputs.sites_0.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: slurm-accounts
+                resource: ${{ inputs.sites_0.resource }}
+                optional: true
+              partition:
+                type: slurm-partitions
+                label: Partition
+                resource: ${{ inputs.sites_0.resource }}
+                optional: true
+              time:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+              nodes:
+                label: Nodes
+                type: number
+                default: 1
+                min: 1
+                optional: true
+
+          pbs:
+            type: group
+            label: PBS Configuration
+            hidden: ${{ inputs.sites_0.resource.schedulerType != 'pbs' || inputs.sites_0.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: string
+                optional: true
+              queue:
+                label: Queue
+                type: string
+                optional: true
+              walltime:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+
+      # ========================================================================
+      # Site 1 Configuration
+      # ========================================================================
+      sites_1:
+        type: group
+        label: "Site 1"
+        items:
+          enabled:
+            type: boolean
+            default: false
+            label: Enabled
+
+          name:
+            label: Site Name
+            type: string
+            default: "Site-1"
+            tooltip: Human-readable identifier for this site
+
+          resource:
+            label: Resource
+            type: compute-clusters
+            autoselect: false
+            optional: true
+            tooltip: The compute resource for this site
+
+          priority:
+            label: Priority
+            type: number
+            default: 2
+            min: 1
+            max: 100
+            tooltip: Lower number = higher priority (for race mode)
+
+          scheduler:
+            type: boolean
+            default: false
+            label: Submit to Scheduler?
+
+          slurm:
+            type: group
+            label: SLURM Configuration
+            hidden: ${{ inputs.sites_1.resource.schedulerType != 'slurm' || inputs.sites_1.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: slurm-accounts
+                resource: ${{ inputs.sites_1.resource }}
+                optional: true
+              partition:
+                type: slurm-partitions
+                label: Partition
+                resource: ${{ inputs.sites_1.resource }}
+                optional: true
+              time:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+              nodes:
+                label: Nodes
+                type: number
+                default: 1
+                min: 1
+                optional: true
+
+          pbs:
+            type: group
+            label: PBS Configuration
+            hidden: ${{ inputs.sites_1.resource.schedulerType != 'pbs' || inputs.sites_1.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: string
+                optional: true
+              queue:
+                label: Queue
+                type: string
+                optional: true
+              walltime:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+
+      # ========================================================================
+      # Site 2 Configuration
+      # ========================================================================
+      sites_2:
+        type: group
+        label: "Site 2"
+        items:
+          enabled:
+            type: boolean
+            default: false
+            label: Enabled
+
+          name:
+            label: Site Name
+            type: string
+            default: "Site-2"
+            tooltip: Human-readable identifier for this site
+
+          resource:
+            label: Resource
+            type: compute-clusters
+            autoselect: false
+            optional: true
+            tooltip: The compute resource for this site
+
+          priority:
+            label: Priority
+            type: number
+            default: 3
+            min: 1
+            max: 100
+
+          scheduler:
+            type: boolean
+            default: false
+            label: Submit to Scheduler?
+
+          slurm:
+            type: group
+            label: SLURM Configuration
+            hidden: ${{ inputs.sites_2.resource.schedulerType != 'slurm' || inputs.sites_2.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: slurm-accounts
+                resource: ${{ inputs.sites_2.resource }}
+                optional: true
+              partition:
+                type: slurm-partitions
+                label: Partition
+                resource: ${{ inputs.sites_2.resource }}
+                optional: true
+              time:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+              nodes:
+                label: Nodes
+                type: number
+                default: 1
+                min: 1
+                optional: true
+
+          pbs:
+            type: group
+            label: PBS Configuration
+            hidden: ${{ inputs.sites_2.resource.schedulerType != 'pbs' || inputs.sites_2.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: string
+                optional: true
+              queue:
+                label: Queue
+                type: string
+                optional: true
+              walltime:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+
+      # ========================================================================
+      # Site 3 Configuration
+      # ========================================================================
+      sites_3:
+        type: group
+        label: "Site 3"
+        items:
+          enabled:
+            type: boolean
+            default: false
+            label: Enabled
+
+          name:
+            label: Site Name
+            type: string
+            default: "Site-3"
+            tooltip: Human-readable identifier for this site
+
+          resource:
+            label: Resource
+            type: compute-clusters
+            autoselect: false
+            optional: true
+            tooltip: The compute resource for this site
+
+          priority:
+            label: Priority
+            type: number
+            default: 4
+            min: 1
+            max: 100
+
+          scheduler:
+            type: boolean
+            default: false
+            label: Submit to Scheduler?
+
+          slurm:
+            type: group
+            label: SLURM Configuration
+            hidden: ${{ inputs.sites_3.resource.schedulerType != 'slurm' || inputs.sites_3.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: slurm-accounts
+                resource: ${{ inputs.sites_3.resource }}
+                optional: true
+              partition:
+                type: slurm-partitions
+                label: Partition
+                resource: ${{ inputs.sites_3.resource }}
+                optional: true
+              time:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+              nodes:
+                label: Nodes
+                type: number
+                default: 1
+                min: 1
+                optional: true
+
+          pbs:
+            type: group
+            label: PBS Configuration
+            hidden: ${{ inputs.sites_3.resource.schedulerType != 'pbs' || inputs.sites_3.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: string
+                optional: true
+              queue:
+                label: Queue
+                type: string
+                optional: true
+              walltime:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+
+      # ========================================================================
+      # Site 4 Configuration
+      # ========================================================================
+      sites_4:
+        type: group
+        label: "Site 4"
+        items:
+          enabled:
+            type: boolean
+            default: false
+            label: Enabled
+
+          name:
+            label: Site Name
+            type: string
+            default: "Site-4"
+            tooltip: Human-readable identifier for this site
+
+          resource:
+            label: Resource
+            type: compute-clusters
+            autoselect: false
+            optional: true
+            tooltip: The compute resource for this site
+
+          priority:
+            label: Priority
+            type: number
+            default: 5
+            min: 1
+            max: 100
+
+          scheduler:
+            type: boolean
+            default: false
+            label: Submit to Scheduler?
+
+          slurm:
+            type: group
+            label: SLURM Configuration
+            hidden: ${{ inputs.sites_4.resource.schedulerType != 'slurm' || inputs.sites_4.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: slurm-accounts
+                resource: ${{ inputs.sites_4.resource }}
+                optional: true
+              partition:
+                type: slurm-partitions
+                label: Partition
+                resource: ${{ inputs.sites_4.resource }}
+                optional: true
+              time:
+                label: Walltime
+                type: string
+                default: "04:00:00"
+              nodes:
+                label: Nodes
+                type: number
+                default: 1
+                min: 1
+                optional: true
+
+          pbs:
+            type: group
+            label: PBS Configuration
+            hidden: ${{ inputs.sites_4.resource.schedulerType != 'pbs' || inputs.sites_4.scheduler == false }}
+            items:
+              account:
+                label: Account
+                type: string
+                optional: true
+              queue:
+                label: Queue
+                type: string
+                optional: true
+              walltime:
+                label: Walltime
+                type: string
+                default: "04:00:00"

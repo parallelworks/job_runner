@@ -10,7 +10,7 @@ def test_top_level_sections(workflow_data):
 
 def test_required_jobs_exist(workflow_data):
     expected_jobs = {
-        "stream_output",
+        "log",
         "create_script_template",
         "ssh_job",
         "pbs_job",
@@ -22,7 +22,7 @@ def test_required_jobs_exist(workflow_data):
 
 def test_jobs_share_remote_host_and_rundir(workflow_data):
     for job_name in (
-        "stream_output",
+        "log",
         "create_script_template",
         "ssh_job",
         "pbs_job",
