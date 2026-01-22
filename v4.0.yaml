@@ -22,6 +22,9 @@
 #           account: myaccount
 # ==============================================================================
 
+permissions:
+  - "*"
+
 jobs:
   # ============================================================================
   # Output Streaming - Tails job output for real-time visibility
