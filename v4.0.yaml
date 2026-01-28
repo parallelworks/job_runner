@@ -84,6 +84,18 @@ jobs:
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
     steps:
+      - name: Setup Environment
+        run: |
+          set -x
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
+
+          # Clean up stale marker files from previous runs
+          echo "$(date) Cleaning up stale marker files"
+          rm -f CANCEL_STREAMING job.ended job.started HOSTNAME COMPLETED jobid run-template.sh run.sh
+
+          echo "$(date) Environment setup complete"
+
       - name: Validate Scheduler Selection
         run: |
           set -x
@@ -113,19 +125,25 @@ jobs:
 
           chmod +x run-template.sh
 
-          # Inject job markers if enabled
+          # Always inject PATH setup for pw CLI, and job markers if enabled
+          cat > run-template-wrapped.sh << 'MARKER_EOF'
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
+          MARKER_EOF
+
           if [[ "${{ inputs.inject_markers }}" == "true" ]]; then
-            # Create a wrapper that adds markers
-            cat > run-template-wrapped.sh << 'MARKER_EOF'
+            # Add job markers for session management
+            cat >> run-template-wrapped.sh << 'MARKER_EOF'
           # Job markers for session management
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
           MARKER_EOF
-            cat run-template.sh >> run-template-wrapped.sh
-            mv run-template-wrapped.sh run-template.sh
-            chmod +x run-template.sh
           fi
+
+          cat run-template.sh >> run-template-wrapped.sh
+          mv run-template-wrapped.sh run-template.sh
+          chmod +x run-template.sh
 
           echo "$(date) Script template created:"
           cat run-template.sh
@@ -452,7 +470,7 @@ jobs:
             # Try to get compute node and run cancel script there
             target_node=$(squeue -j "${jobid}" --noheader --format="%N" 2>/dev/null | head -1)
             if [[ -n "${target_node}" ]]; then
-              ssh "${target_node}" "cd ${PWD} && bash cancel.sh" 2>/dev/null || true
+              ssh "${target_node}" "export PATH=\"\$PATH:\$HOME/pw\" && cd ${PWD} && bash cancel.sh" 2>/dev/null || true
             fi
             
             scancel "${jobid}" 2>/dev/null || true
@@ -567,6 +585,7 @@ jobs:
           # Run user's cancel script if it exists
           if [ -f cancel.sh ]; then
             echo "$(date) Running cancel.sh"
+            export PATH="$PATH:$HOME/pw"
             bash cancel.sh 2>/dev/null || true
           fi
 
