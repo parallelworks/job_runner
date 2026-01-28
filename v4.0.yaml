@@ -187,8 +187,6 @@ jobs:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
-    outputs:
-      jobid: ${{ needs.pbs_job.steps.submit.outputs.jobid }}
     steps:
       - name: Create PBS Script
         id: create_script
@@ -340,8 +338,6 @@ jobs:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
-    outputs:
-      jobid: ${{ needs.slurm_job.steps.submit.outputs.jobid }}
     steps:
       - name: Create SLURM Script
         id: create_script
