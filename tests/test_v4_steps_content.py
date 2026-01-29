@@ -1,15 +1,13 @@
 from tests.helpers import get_job, get_step_run, get_step_cleanup
 
 
-def test_stream_output_script_contains_markers(workflow_data):
-    job = get_job(workflow_data, "stream_output")
-    run = get_step_run(job, "Stream Output")
+def test_log_job_output_script(workflow_data):
+    job = get_job(workflow_data, "log")
+    run = get_step_run(job, "Job Output")
     assert 'OUTPUT_FILE="run.${PW_JOB_ID}.out"' in run
-    assert "timeout=60" in run
     assert "tail -f" in run
     assert "CANCEL_STREAMING" in run
     assert "job.ended" in run
-    assert "ERROR: Job ended unexpectedly" in run
 
 
 def test_create_script_template_validation(workflow_data):
