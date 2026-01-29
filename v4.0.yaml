@@ -38,13 +38,9 @@ jobs:
         run: |
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
 
-          # Wait for output file to exist (with timeout)
-          timeout=60
-          elapsed=0
+          # Wait for output file to exist (no timeout - jobs can be queued for a while)
           while [ ! -f "${OUTPUT_FILE}" ]; do
             sleep 1
-            ((elapsed++))
-            [[ $elapsed -ge $timeout ]] && { echo "$(date) Timeout waiting for ${OUTPUT_FILE}"; break; }
           done
 
           # Start tailing
