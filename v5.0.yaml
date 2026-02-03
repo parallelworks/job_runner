@@ -15,6 +15,9 @@
 #   - Automatic fault tolerance with retries and failover
 # ==============================================================================
 
+permissions:
+  - "*"
+
 jobs:
   # ============================================================================
   # Initialize - Validate sites and create coordination structure
@@ -24,10 +27,19 @@ jobs:
       - name: Setup Coordination Directory
         run: |
           set -e
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
+
           echo "$(date) [coordinator] Initializing load balancer execution"
 
-          # Create coordination directory
+          # Clean up stale coordination directory from previous runs
           COORD_DIR="${PWD}/lb_${PW_JOB_ID}"
+          if [ -d "${COORD_DIR}" ]; then
+            echo "$(date) [coordinator] Cleaning up stale coordination directory"
+            rm -rf "${COORD_DIR}"
+          fi
+
+          # Create coordination directory
           mkdir -p "${COORD_DIR}"
 
           # Count enabled sites
@@ -140,9 +152,11 @@ jobs:
           fi
           chmod +x run-script.sh
 
-          # Inject job markers
+          # Inject job markers and PATH setup for pw CLI
           cat > run.sh << 'MARKER_EOF'
           #!/bin/bash
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
@@ -386,8 +400,11 @@ jobs:
           fi
           chmod +x run-script.sh
 
+          # Inject job markers and PATH setup for pw CLI
           cat > run.sh << 'MARKER_EOF'
           #!/bin/bash
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
@@ -613,8 +630,11 @@ jobs:
           fi
           chmod +x run-script.sh
 
+          # Inject job markers and PATH setup for pw CLI
           cat > run.sh << 'MARKER_EOF'
           #!/bin/bash
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
@@ -840,8 +860,11 @@ jobs:
           fi
           chmod +x run-script.sh
 
+          # Inject job markers and PATH setup for pw CLI
           cat > run.sh << 'MARKER_EOF'
           #!/bin/bash
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
@@ -1067,8 +1090,11 @@ jobs:
           fi
           chmod +x run-script.sh
 
+          # Inject job markers and PATH setup for pw CLI
           cat > run.sh << 'MARKER_EOF'
           #!/bin/bash
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
@@ -1266,20 +1292,13 @@ jobs:
         run: |
           echo "$(date) [log] Starting aggregated output streaming"
 
-          # Wait for at least one output file
-          timeout=120
-          elapsed=0
+          # Wait for at least one output file (no timeout - jobs can be queued for a while)
           while true; do
             output_count=$(ls site_*/run.out 2>/dev/null | wc -l || echo 0)
             if [[ ${output_count} -gt 0 ]]; then
               break
             fi
             sleep 2
-            ((elapsed+=2))
-            if [[ ${elapsed} -ge ${timeout} ]]; then
-              echo "$(date) [log] Timeout waiting for output files"
-              break
-            fi
           done
 
           # Tail all output files

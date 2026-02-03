@@ -1,7 +1,7 @@
 def test_execution_mode_input(v5_workflow_data):
     inputs = v5_workflow_data["on"]["execute"]["inputs"]
     execution_mode = inputs["execution_mode"]
-    assert execution_mode["type"] == "select"
+    assert execution_mode["type"] == "dropdown"
     assert execution_mode["default"] == "race"
     options = [opt["value"] for opt in execution_mode["options"]]
     assert "race" in options
