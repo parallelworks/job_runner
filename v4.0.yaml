@@ -86,7 +86,6 @@ jobs:
     steps:
       - name: Create Script Template
         run: |
-          set -x
           # Ensure pw CLI is available in PATH
           export PATH="$PATH:$HOME/pw"
 
@@ -153,7 +152,6 @@ jobs:
     steps:
       - name: Execute SSH Job
         run: |
-          set -x
           # Create SSH script
           cat > run.sh << 'SHEBANG_EOF'
           ${{ inputs.shebang }}
@@ -180,7 +178,6 @@ jobs:
             exit ${exit_code}
           fi
         cleanup: |
-          set -x
           echo "$(date) SSH job cleanup triggered"
           pkill -f "run.sh" 2>/dev/null || true
           touch job.ended
@@ -198,7 +195,6 @@ jobs:
     steps:
       - name: Create PBS Script
         run: |
-          set -x
 
           cat > run.sh << 'SHEBANG_EOF'
           ${{ inputs.shebang }}
@@ -249,7 +245,6 @@ jobs:
 
       - name: Submit and Monitor PBS Job
         run: |
-          set -x
           echo "$(date) Submitting PBS Job"
 
           submit_output=$(qsub run.sh 2>&1)
@@ -321,7 +316,6 @@ jobs:
             esac
           done
         cleanup: |
-          set -x
           echo "$(date) PBS job cleanup triggered"
           if [ -f jobid ]; then
             jobid=$(cat jobid)
@@ -343,7 +337,6 @@ jobs:
     steps:
       - name: Create SLURM Script
         run: |
-          set -x
 
           cat > run.sh << 'SHEBANG_EOF'
           ${{ inputs.shebang }}
@@ -418,7 +411,6 @@ jobs:
 
       - name: Submit and Monitor SLURM Job
         run: |
-          set -x
           echo "$(date) Submitting SLURM Job"
 
           submit_output=$(sbatch run.sh 2>&1)
@@ -495,7 +487,6 @@ jobs:
             esac
           done
         cleanup: |
-          set -x
           echo "$(date) SLURM job cleanup triggered"
           if [ -f jobid ]; then
             jobid=$(cat jobid)
@@ -526,11 +517,9 @@ jobs:
     steps:
       - name: Cleanup
         run: |
-          set -x
           echo "$(date) Workflow completed"
           touch COMPLETED
         cleanup: |
-          set -x
           echo "$(date) Cleanup handler triggered"
           touch CANCEL_STREAMING
 
