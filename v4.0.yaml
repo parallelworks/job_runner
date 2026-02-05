@@ -297,15 +297,32 @@ jobs:
             case "${job_status}" in
               C|E|"")
                 echo "$(date) PBS job completed or not found (state: ${job_status})"
+                touch job.ended
 
                 # Check exit status if available
                 exit_status=$(qstat -f ${jobid} 2>/dev/null | grep "Exit_status" | cut -d'=' -f2 | tr -d ' ' || echo "0")
-                if [[ "${exit_status}" != "0" && -n "${exit_status}" ]]; then
-                  echo "$(date) WARNING: Job exited with status ${exit_status}"
-                fi
 
-                touch job.ended
-                break
+                # PBS exit status: 0 = success, 271 = exceeded walltime, -11 = killed
+                case "${exit_status}" in
+                  0|"")
+                    echo "$(date) Job completed successfully"
+                    exit 0
+                    ;;
+                  271)
+                    # Wall time expiration
+                    echo "$(date) Job reached wall time limit - completing gracefully"
+                    exit 0
+                    ;;
+                  -11|-12)
+                    # Job was killed/cancelled
+                    echo "$(date) Job was cancelled - completing gracefully"
+                    exit 0
+                    ;;
+                  *)
+                    echo "$(date) ERROR: Job exited with status ${exit_status}"
+                    exit 1
+                    ;;
+                esac
                 ;;
               H|Q|W|T|M)
                 echo "$(date) Job waiting/held (state: ${job_status})"
@@ -461,17 +478,32 @@ jobs:
               final_state=$(sacct -j ${jobid} --format=state --noheader 2>/dev/null | head -1 | tr -d ' ')
               echo "$(date) Job completed with final state: ${final_state}"
 
+              touch job.ended
+
               case "${final_state}" in
                 COMPLETED)
                   echo "$(date) Job completed successfully"
+                  exit 0
                   ;;
-                FAILED|NODE_FAIL|TIMEOUT|CANCELLED|OUT_OF_MEMORY)
-                  echo "$(date) WARNING: Job ended with state ${final_state}"
+                TIMEOUT)
+                  # Wall time expiration is an expected completion condition
+                  echo "$(date) Job reached wall time limit - completing gracefully"
+                  exit 0
+                  ;;
+                CANCELLED)
+                  # User-initiated cancellation - exit gracefully
+                  echo "$(date) Job was cancelled - completing gracefully"
+                  exit 0
+                  ;;
+                FAILED|NODE_FAIL|OUT_OF_MEMORY)
+                  echo "$(date) ERROR: Job ended with state ${final_state}"
+                  exit 1
+                  ;;
+                *)
+                  echo "$(date) Job ended with unknown state: ${final_state}"
+                  exit 0
                   ;;
               esac
-
-              touch job.ended
-              break
             fi
 
             case "${job_status}" in
