@@ -22,6 +22,9 @@
 #           account: myaccount
 # ==============================================================================
 
+permissions:
+  - "*"
+
 jobs:
   # ============================================================================
   # Output Streaming - Tails job output for real-time visibility
@@ -81,9 +84,17 @@ jobs:
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
     steps:
-      - name: Validate Scheduler Selection
+      - name: Create Script Template
         run: |
           set -x
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
+
+          # Clean up stale marker files from previous runs
+          echo "$(date) Cleaning up stale marker files"
+          rm -f CANCEL_STREAMING job.ended job.started HOSTNAME COMPLETED jobid run-template.sh run.sh
+
+          # Validate scheduler selection
           if [[ "${{ inputs.scheduler }}" == "true" ]]; then
             if [[ "${{ inputs.slurm.is_disabled }}" == "true" && "${{ inputs.pbs.is_disabled }}" == "true" ]]; then
               echo "$(date) ERROR: Scheduler enabled but no scheduler type is active."
@@ -91,10 +102,6 @@ jobs:
               exit 1
             fi
           fi
-      - name: Create Script Template
-        run: |
-          set -x
-
           if [[ "${{ inputs.use_existing_script }}" == "true" ]]; then
             if [ ! -f "${{ inputs.script_path }}" ]; then
               echo "$(date) ERROR: File ${{ inputs.script_path }} does not exist or is not a regular file." >&2
@@ -110,19 +117,25 @@ jobs:
 
           chmod +x run-template.sh
 
-          # Inject job markers if enabled
+          # Always inject PATH setup for pw CLI, and job markers if enabled
+          cat > run-template-wrapped.sh << 'MARKER_EOF'
+          # Ensure pw CLI is available in PATH
+          export PATH="$PATH:$HOME/pw"
+          MARKER_EOF
+
           if [[ "${{ inputs.inject_markers }}" == "true" ]]; then
-            # Create a wrapper that adds markers
-            cat > run-template-wrapped.sh << 'MARKER_EOF'
+            # Add job markers for session management
+            cat >> run-template-wrapped.sh << 'MARKER_EOF'
           # Job markers for session management
           touch job.started
           hostname > HOSTNAME
           echo "$(date) Job started on $(hostname)"
           MARKER_EOF
-            cat run-template.sh >> run-template-wrapped.sh
-            mv run-template-wrapped.sh run-template.sh
-            chmod +x run-template.sh
           fi
+
+          cat run-template.sh >> run-template-wrapped.sh
+          mv run-template-wrapped.sh run-template.sh
+          chmod +x run-template.sh
 
           echo "$(date) Script template created:"
           cat run-template.sh
@@ -138,9 +151,10 @@ jobs:
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
     steps:
-      - name: Create SSH Script
+      - name: Execute SSH Job
         run: |
           set -x
+          # Create SSH script
           cat > run.sh << 'SHEBANG_EOF'
           ${{ inputs.shebang }}
           SHEBANG_EOF
@@ -152,9 +166,7 @@ jobs:
           echo "$(date) SSH script created:"
           cat run.sh
 
-      - name: Execute Script
-        run: |
-          set -x
+          # Execute script
           echo "$(date) Executing script via SSH"
           ./run.sh > run.${PW_JOB_ID}.out 2>&1
           exit_code=$?
@@ -170,7 +182,6 @@ jobs:
         cleanup: |
           set -x
           echo "$(date) SSH job cleanup triggered"
-          # Try to kill any background processes from the script
           pkill -f "run.sh" 2>/dev/null || true
           touch job.ended
 
@@ -184,11 +195,8 @@ jobs:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
-    outputs:
-      jobid: ${{ needs.pbs_job.steps.submit.outputs.jobid }}
     steps:
       - name: Create PBS Script
-        id: create_script
         run: |
           set -x
 
@@ -239,8 +247,7 @@ jobs:
           echo "$(date) PBS script created:"
           cat run.sh
 
-      - name: Submit PBS Job
-        id: submit
+      - name: Submit and Monitor PBS Job
         run: |
           set -x
           echo "$(date) Submitting PBS Job"
@@ -269,33 +276,20 @@ jobs:
           fi
 
           echo "$(date) PBS job submitted: ${jobid}"
-          echo "jobid=${jobid}" | tee -a $OUTPUTS
+          echo "jobid=${jobid}" >> $OUTPUTS
           echo "${jobid}" > jobid
-        cleanup: |
-          set -x
-          echo "$(date) PBS job cleanup triggered"
-          if [ -f jobid ]; then
-            jobid=$(cat jobid)
-            echo "$(date) Cancelling PBS job ${jobid}"
-            qdel "${jobid}" 2>/dev/null || true
-          fi
-          touch job.ended
 
-      - name: Monitor PBS Job
-        id: monitor
-        run: |
-          set -x
-          jobid=${{ needs.pbs_job.steps.submit.outputs.jobid }}
+          # Monitor job until completion
           echo "$(date) Monitoring PBS job ${jobid}"
 
           get_pbs_job_status() {
             if [ -z "${QSTAT_HEADER}" ]; then
               export QSTAT_HEADER="$(qstat 2>/dev/null | awk 'NR==1')"
             fi
-            
+
             status_response=$(qstat 2>/dev/null | grep "\<${jobid}\>" || true)
             job_status=$(qstat -f ${jobid} 2>/dev/null | grep "job_state" | cut -d'=' -f2 | tr -d ' ' || true)
-            
+
             echo "${QSTAT_HEADER}"
             echo "${status_response}"
             echo "Job state: ${job_status}"
@@ -304,17 +298,17 @@ jobs:
           while true; do
             sleep ${{ inputs.poll_interval }}
             get_pbs_job_status
-            
+
             case "${job_status}" in
               C|E|"")
                 echo "$(date) PBS job completed or not found (state: ${job_status})"
-                
+
                 # Check exit status if available
                 exit_status=$(qstat -f ${jobid} 2>/dev/null | grep "Exit_status" | cut -d'=' -f2 | tr -d ' ' || echo "0")
                 if [[ "${exit_status}" != "0" && -n "${exit_status}" ]]; then
                   echo "$(date) WARNING: Job exited with status ${exit_status}"
                 fi
-                
+
                 touch job.ended
                 break
                 ;;
@@ -326,6 +320,15 @@ jobs:
                 ;;
             esac
           done
+        cleanup: |
+          set -x
+          echo "$(date) PBS job cleanup triggered"
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            echo "$(date) Cancelling PBS job ${jobid}"
+            qdel "${jobid}" 2>/dev/null || true
+          fi
+          touch job.ended
 
   # ============================================================================
   # SLURM Job
@@ -337,11 +340,8 @@ jobs:
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
-    outputs:
-      jobid: ${{ needs.slurm_job.steps.submit.outputs.jobid }}
     steps:
       - name: Create SLURM Script
-        id: create_script
         run: |
           set -x
 
@@ -416,8 +416,7 @@ jobs:
           echo "$(date) SLURM script created:"
           cat run.sh
 
-      - name: Submit SLURM Job
-        id: submit
+      - name: Submit and Monitor SLURM Job
         run: |
           set -x
           echo "$(date) Submitting SLURM Job"
@@ -441,55 +440,35 @@ jobs:
           fi
 
           echo "$(date) SLURM job submitted: ${jobid}"
-          echo "jobid=${jobid}" | tee -a $OUTPUTS
+          echo "jobid=${jobid}" >> $OUTPUTS
           echo "${jobid}" > jobid
-        cleanup: |
-          set -x
-          echo "$(date) SLURM job cleanup triggered"
-          if [ -f jobid ]; then
-            jobid=$(cat jobid)
-            echo "$(date) Cancelling SLURM job ${jobid}"
-            
-            # Try to get compute node and run cancel script there
-            target_node=$(squeue -j "${jobid}" --noheader --format="%N" 2>/dev/null | head -1)
-            if [[ -n "${target_node}" ]]; then
-              ssh "${target_node}" "cd ${PWD} && bash cancel.sh" 2>/dev/null || true
-            fi
-            
-            scancel "${jobid}" 2>/dev/null || true
-          fi
-          touch job.ended
 
-      - name: Monitor SLURM Job
-        id: monitor
-        run: |
-          set -x
-          jobid=${{ needs.slurm_job.steps.submit.outputs.jobid }}
+          # Monitor job until completion
           echo "$(date) Monitoring SLURM job ${jobid}"
 
           get_slurm_job_status() {
             if [ -z "${SQUEUE_HEADER}" ]; then
               export SQUEUE_HEADER="$(squeue 2>/dev/null | awk 'NR==1')"
             fi
-            
+
             status_column=$(echo "${SQUEUE_HEADER}" | awk '{ for (i=1; i<=NF; i++) if ($i ~ /^S/) { print i; exit } }')
             status_response=$(squeue 2>/dev/null | awk -v jobid="${jobid}" '$1 == jobid')
-            
+
             echo "${SQUEUE_HEADER}"
             echo "${status_response}"
-            
+
             job_status=$(echo "${status_response}" | awk -v col="${status_column}" '{print $col}')
           }
 
           while true; do
             sleep ${{ inputs.poll_interval }}
             get_slurm_job_status
-            
+
             if [ -z "${job_status}" ]; then
               # Job no longer in queue - check final status
               final_state=$(sacct -j ${jobid} --format=state --noheader 2>/dev/null | head -1 | tr -d ' ')
               echo "$(date) Job completed with final state: ${final_state}"
-              
+
               case "${final_state}" in
                 COMPLETED)
                   echo "$(date) Job completed successfully"
@@ -498,11 +477,11 @@ jobs:
                   echo "$(date) WARNING: Job ended with state ${final_state}"
                   ;;
               esac
-              
+
               touch job.ended
               break
             fi
-            
+
             case "${job_status}" in
               PD)
                 echo "$(date) Job pending"
@@ -515,6 +494,22 @@ jobs:
                 ;;
             esac
           done
+        cleanup: |
+          set -x
+          echo "$(date) SLURM job cleanup triggered"
+          if [ -f jobid ]; then
+            jobid=$(cat jobid)
+            echo "$(date) Cancelling SLURM job ${jobid}"
+
+            # Try to get compute node and run cancel script there
+            target_node=$(squeue -j "${jobid}" --noheader --format="%N" 2>/dev/null | head -1)
+            if [[ -n "${target_node}" ]]; then
+              ssh "${target_node}" "export PATH=\"\$PATH:\$HOME/pw\" && cd ${PWD} && bash cancel.sh" 2>/dev/null || true
+            fi
+
+            scancel "${jobid}" 2>/dev/null || true
+          fi
+          touch job.ended
 
   # ============================================================================
   # Cleanup (Always runs)
@@ -568,6 +563,7 @@ jobs:
           # Run user's cancel script if it exists
           if [ -f cancel.sh ]; then
             echo "$(date) Running cancel.sh"
+            export PATH="$PATH:$HOME/pw"
             bash cancel.sh 2>/dev/null || true
           fi
 
