@@ -44,13 +44,14 @@ def test_pbs_group_defaults(workflow_data):
 
 
 def test_job_output_wiring(workflow_data):
+    # Jobs now use file-based jobid storage instead of step outputs
+    # Verify the submit steps write jobid to both $OUTPUTS and file
+    from tests.helpers import get_step_run
     pbs_job = get_job(workflow_data, "pbs_job")
     slurm_job = get_job(workflow_data, "slurm_job")
-    assert (
-        pbs_job["outputs"]["jobid"]
-        == "${{ needs.pbs_job.steps.submit.outputs.jobid }}"
-    )
-    assert (
-        slurm_job["outputs"]["jobid"]
-        == "${{ needs.slurm_job.steps.submit.outputs.jobid }}"
-    )
+    pbs_run = get_step_run(pbs_job, "Submit and Monitor PBS Job")
+    slurm_run = get_step_run(slurm_job, "Submit and Monitor SLURM Job")
+    assert 'echo "jobid=${jobid}" >> $OUTPUTS' in pbs_run
+    assert 'echo "${jobid}" > jobid' in pbs_run
+    assert 'echo "jobid=${jobid}" >> $OUTPUTS' in slurm_run
+    assert 'echo "${jobid}" > jobid' in slurm_run
