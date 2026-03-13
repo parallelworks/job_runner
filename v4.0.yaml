@@ -146,7 +146,7 @@ jobs:
   ssh_job:
     needs:
       - create_script_template
-    if: ${{ inputs.scheduler != 'true' && inputs.slurm.is_disabled != 'false' && inputs.pbs.is_disabled != 'false' }}
+    if: ${{ inputs.scheduler == false && inputs.slurm.is_disabled && inputs.pbs.is_disabled }}
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
@@ -189,7 +189,7 @@ jobs:
   pbs_job:
     needs:
       - create_script_template
-    if: ${{ inputs.pbs.is_disabled != 'true' }}
+    if: ${{ inputs.pbs.is_disabled == false }}
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
@@ -348,7 +348,7 @@ jobs:
   slurm_job:
     needs:
       - create_script_template
-    if: ${{ inputs.slurm.is_disabled != 'true' }}
+    if: ${{ inputs.slurm.is_disabled == false }}
     working-directory: ${{ inputs.rundir }}
     ssh:
       remoteHost: ${{ inputs.resource.ip }}
