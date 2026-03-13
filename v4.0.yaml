@@ -38,14 +38,15 @@ jobs:
         run: |
           OUTPUT_FILE="run.${PW_JOB_ID}.out"
 
-          # Wait for output file to exist (with timeout)
-          timeout=60
-          elapsed=0
-          while [ ! -f "${OUTPUT_FILE}" ]; do
+          # Wait for output file to exist (job may be queued/pending)
+          while [ ! -f "${OUTPUT_FILE}" ] && [ ! -f "job.ended" ]; do
             sleep 1
-            ((elapsed++))
-            [[ $elapsed -ge $timeout ]] && { echo "$(date) Timeout waiting for ${OUTPUT_FILE}"; break; }
           done
+
+          if [ ! -f "${OUTPUT_FILE}" ]; then
+            echo "$(date) Job ended before output file was created"
+            exit 0
+          fi
 
           # Start tailing
           touch "${OUTPUT_FILE}"
