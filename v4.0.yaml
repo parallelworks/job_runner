@@ -468,10 +468,12 @@ jobs:
 
             job_status=$(echo "${status_response}" | awk -v col="${status_column}" '{print $col}')
           }
+          sleep 1
 
           while true; do
-            sleep ${{ inputs.poll_interval }}
+            
             get_slurm_job_status
+            sleep ${{ inputs.poll_interval }}
 
             if [ -z "${job_status}" ]; then
               # Job no longer in queue - check final status
